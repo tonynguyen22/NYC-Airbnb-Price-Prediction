@@ -1,0 +1,268 @@
+---
+title: "NYC Airbnb Listing Price Prediction"
+date: "2023-05-25"
+author: "Kien Le, Tony Nguyen"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+```{r}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+
+<style type="text/css">
+h1.title {
+  font-size: 38px;
+  text-align: center;
+}
+h4.author {
+  font-size: 18px;
+  text-align: center;
+}
+h4.date { 
+  font-size: 18px;
+  text-align: center;
+}
+
+body {
+  font-size: 14px;
+}
+</style>
+
+## 1. Project Overview. 
+
+Airbnb is an online marketplace and hospitality service platform that allows individuals to rent out their properties or spare rooms to guests seeking short-term accommodations. The Airbnb platform connects hosts and guests, providing a user-friendly interface where hosts can list their available spaces, set their own prices, and provide detailed descriptions and photos of their accommodations. Guests can then search for listings based on their desired location, travel dates, and specific preferences. The main purpose of this report is to analyze and predict the prices of Airbnb listings in New York City (NYC). This project is intended to provide valuable insights for both hosts and guests, enabling them to make informed decisions regarding pricing and booking accommodations in NYC.
+
+Guiding questions:
+
+1. What are the key factors that influence the pricing of Airbnb listings in NYC?
+
+2. How accurate are the predictions of our model, and what are the potential limitations or uncertainties associated with the predictions?
+
+Domain: Housing Price. The goal is to predict a continuous target variable (in this case, the price) based on a set of input variables (the other columns in the dataset). We will split the data set into a training set and a testing set, where the training set is used to train the model, and the testing set is used to evaluate its performance. Once we have built and evaluated the model, we can use it to predict the price of new Airbnb listings in the future based on their features. These are our initial thoughts and they might change later on
+
+## 2. Data and Resources Used.
+
+The data set we used is on Kaggle website and it is called the “New York City Airbnb Open Data”.The New York City Airbnb Open Data set contains information about Airbnb listings in New York City. Here is the list of the variables that we will mostly focus on:
+
+1.`neighbourhood_group`: The borough or area of New York City where the listing is located.
+
+Data Type: Categorical (string)
+
+Example: "Brooklyn"
+
+2.`room_type`: The type of room or accommodation.
+
+Data Type: Categorical (string)
+
+Example: "Private room"
+
+3.`price`: The price per night to rent the listing.
+
+Data Type: Numeric (integer)
+
+Example: 149
+
+4.`minimum_nights`: The minimum number of nights required for a stay.
+
+Data Type: Numeric (integer)
+
+Example: 1
+
+5.`number_of_reviews`: The number of reviews received for the listing.
+
+Data Type: Numeric (integer)
+
+Example: 9
+
+6.`availability_365`: The number of days the listing is available within a year.
+
+Data Type: Numeric (integer)
+
+Example: 365
+
+7.`calculated_host_listings_count`: The total number of listings by the host.
+
+Data Type: Numeric (integer)
+
+Example: 6
+
+## 3. Data Cleaning and Pre-processing
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(caTools)
+library(randomForest)
+
+# Load data
+data <- read.csv("airbnb_data.csv")
+
+# Drop unneeded columns
+data <- data[, -c(1,2,3,4,6,13)]
+
+# Fill missing values
+data$reviews_per_month <- ifelse(is.na(data$reviews_per_month), 0, data$reviews_per_month)
+
+# Convert to factors
+data$neighbourhood_group <- factor(data$neighbourhood_group)
+data$room_type <- factor(data$room_type)
+
+# Cap outliers instead of removing them
+data$price <- ifelse(data$price > 500, 500, data$price)
+
+# Add log-transformed price for modeling
+data$log_price <- log(data$price + 1)
+
+# Create new features
+data$review_rate <- data$number_of_reviews / (data$availability_365 + 1)
+data$room_borough <- interaction(data$room_type, data$neighbourhood_group)
+```
+
+## 4. Exploratory Data Analysis
+
+### a. Price distribution
+This histogram shows the distribution of nightly Airbnb prices in NYC, with extreme values capped at \$500 to better visualize the majority of listings. Most listings fall in the range of \$50 to \$150 per night, with a sharp drop-off beyond $200. The distribution is heavily right-skewed, indicating a small subset of high-priced listings that could distort statistical analysis if not adjusted for, which justifies the use of log transformation and outlier capping in our model.
+```{r}
+ggplot(data = data, aes(x = price)) + 
+  geom_histogram(binwidth = 10) +
+  labs(x = "Price ($)", y = "Number of Airbnb", title = "Price Distribution of Airbnb in NYC (Capped at $500)") +
+  xlim(0, 500)
+```
+
+### b. Room Type Distribution
+The bar chart reveals that the majority of listings are “Entire home/apt” (25,409 listings) and “Private room” (22,326 listings), while “Shared room” listings are relatively rare (1,160). This distribution highlights user preference for privacy and space, and it also suggests that the price prediction model should weigh heavily on room type as a categorical feature due to its significant influence on pricing.
+```{r}
+ggplot(data = data, aes(x = room_type, fill = room_type)) +
+  geom_bar() +
+  geom_text(stat = 'count', aes(label=..count..), vjust = -0.2) +
+  labs(x = "Room Type", y = "Count", title = "Distribution of Room Types in NYC Airbnb Listings") +
+  scale_fill_manual(values = c("#1f78b4", "#b2df8a", "#fb9a99"))
+```
+
+### c. Price by Room Type (Boxplot)
+This boxplot compares the price distribution across different room types, again focusing on listings below $500. Entire homes/apartments show a higher median price and wider spread, while private and shared rooms have lower and more compact distributions. Outliers are common, especially for entire homes, reinforcing the need for model features that capture high-end listing characteristics (e.g., location, availability, host listing count). This visualization confirms that room type is a key predictor of price and helps justify its inclusion in all modeling efforts.
+```{r}
+ggplot(data = data, aes(x=room_type, y=price, fill=room_type)) + 
+  geom_boxplot(outlier.alpha=0.1) +
+  labs(title="Distribution of Price by Room Type (Price < $500)", x="Room Type", y="Price ($)") +
+  scale_fill_manual(values=c("#1f78b4", "#b2df8a", "#fb9a99")) +
+  ylim(0, 500)
+```
+### d. Geospatial Heatmap of Listings
+This geospatial density plot reveals how Airbnb listings are distributed across New York City. The most intense concentrations are found in Manhattan, especially around midtown and lower Manhattan, followed by parts of Brooklyn near the East River. These areas align with popular tourist attractions, nightlife, and transit hubs. The density decreases as we move into the Bronx, Staten Island, and far eastern Queens.
+```{r}
+ggplot(data, aes(x = longitude, y = latitude)) +
+  geom_bin2d(bins = 100) +
+  scale_fill_viridis_c() +
+  coord_fixed() +
+  labs(title = "Density of Airbnb Listings in NYC", x = "Longitude", y = "Latitude")
+```
+
+### e. Average Price by Borough
+This bar chart shows that Manhattan has the highest average nightly price, significantly outpacing all other boroughs at over \$175 per night. Brooklyn follows with an average just above \$115, while Bronx, Queens, and Staten Island are priced more modestly around the $90–100 range.
+```{r}
+ggplot(data, aes(x = neighbourhood_group, y = price, fill = neighbourhood_group)) +
+  stat_summary(fun = mean, geom = "bar") +
+  labs(title = "Average Price by Borough", x = "Borough", y = "Average Price") +
+  theme_minimal()
+```
+
+## 5. Data Split
+```{r}
+set.seed(123)
+split <- sample.split(data$log_price, SplitRatio = 0.8)
+train <- subset(data, split == TRUE)
+test <- subset(data, split == FALSE)
+```
+
+## 6. Random Forest Model with Tuning
+```{r}
+mtry_vals <- c(2, 4, 6)
+nodesize_vals <- c(1, 3, 5)
+maxnodes_vals <- c(30, 50, 100)
+tuning_results <- data.frame()
+
+for (m in mtry_vals) {
+  for (n in nodesize_vals) {
+    for (mx in maxnodes_vals) {
+      model <- randomForest(log_price ~ neighbourhood_group + latitude + longitude +
+                            minimum_nights + room_type + number_of_reviews +
+                            availability_365 + calculated_host_listings_count + review_rate + room_borough,
+                            data = train, ntree = 100, mtry = m, nodesize = n, maxnodes = mx)
+      log_pred <- predict(model, newdata = test)
+      pred_price <- exp(log_pred) - 1
+      rmse <- sqrt(mean((test$price - pred_price)^2))
+      rsq <- 1 - sum((test$price - pred_price)^2) / sum((test$price - mean(test$price))^2)
+      tuning_results <- rbind(tuning_results, data.frame(mtry = m, nodesize = n, maxnodes = mx, RMSE = rmse, R2 = rsq))
+    }
+  }
+}
+
+# Best model
+best_model <- tuning_results[which.min(tuning_results$RMSE), ]
+best_model
+```
+
+## 7. Final Evaluation
+The best-performing Random Forest configuration achieved a Root Mean Squared Error (RMSE) of 76.11 and an R-squared value of 0.438 using the following hyperparameters:
+
+mtry = 6: Allowing 6 variables to be considered at each split increased model flexibility and reduced bias.
+
+nodesize = 5: Ensured a minimum of 5 observations per terminal node, balancing overfitting and underfitting.
+
+maxnodes = 100: Allowed trees to grow relatively deep, capturing complex interactions without becoming too large to overfit.
+```{r}
+# Train with best parameters
+final_model <- randomForest(log_price ~ neighbourhood_group + latitude + longitude +
+                            minimum_nights + room_type + number_of_reviews +
+                            availability_365 + calculated_host_listings_count + review_rate + room_borough,
+                            data = train, ntree = 100, mtry = best_model$mtry,
+                            nodesize = best_model$nodesize, maxnodes = best_model$maxnodes)
+
+final_log_preds <- predict(final_model, newdata = test)
+final_price_preds <- exp(final_log_preds) - 1
+
+final_rmse <- sqrt(mean((test$price - final_price_preds)^2))
+final_r2 <- 1 - sum((test$price - final_price_preds)^2) / sum((test$price - mean(test$price))^2)
+final_rmse
+final_r2
+```
+
+## 8. Results Visualization
+This scatterplot compares the model’s predicted Airbnb prices to the actual prices for the test dataset. While there's a general upward trend along the 45-degree red dashed line (ideal predictions), several key issues are visible:
+
+Prediction compression: The model tends to underpredict higher-priced listings (right side of the plot), with predictions clustering around \$150–$250 regardless of actual values. This is a common limitation of Random Forests, which average outputs across trees and often struggle with extreme values, even with log transformation.
+
+Discrete prediction bands: The horizontal “striping” indicates that many predicted values are repeated or concentrated — especially for listings above $100. This reflects the smoothing behavior of ensemble methods.
+
+Bias at the tails: Listings with prices above ~$250 are often significantly underpredicted, while low-price listings are sometimes overestimated. This suggests the model captures average patterns well but not outlier dynamics.
+
+```{r}
+# Actual vs predicted
+ggplot(data.frame(actual = test$price, predicted = final_price_preds), aes(x = actual, y = predicted)) +
+  geom_point(alpha = 0.3) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(title = "Actual vs Predicted Prices", x = "Actual Price", y = "Predicted Price") +
+  xlim(0, 500) + ylim(0, 500)
+```
+
+## 9. Conclusion
+
+This project successfully built a predictive model for Airbnb listing prices in New York City using a Random Forest approach. After preprocessing, outlier capping, log transformation, and hyperparameter tuning, the model achieved a Root Mean Squared Error (RMSE) of 76.19 and an R² of 0.4365, meaning it explains about 44% of the variance in price. While this is a solid performance for a noisy and nonlinear pricing problem, the model's predictions still tend to compress around the mean — particularly underestimating higher-end listings.
+
+## 10. Recommendation for Using This Model
+
+The current Random Forest model, with an RMSE of approximately \$76 and an R² of 0.44, is best suited for providing pricing guidance within typical market ranges (e.g., \$50–$250 per night). It is a valuable tool for Airbnb hosts, analysts, and platform developers who seek to:
+
+Set competitive base prices for new listings based on neighborhood, room type, and availability.
+
+Screen for pricing outliers or anomalies that may require manual review or adjustment.
+
+Integrate into host-facing dashboards or dynamic pricing tools as a baseline price recommendation engine.
+
+However, the model should be used with caution for luxury listings or highly unique properties, as it tends to underpredict prices in those segments due to averaging behavior inherent in ensemble methods.
+
+For higher accuracy, especially at the price extremes, this model can serve as a first-stage filter, followed by manual review or more specialized pricing algorithms (e.g., segment-specific models or human-in-the-loop adjustments).
